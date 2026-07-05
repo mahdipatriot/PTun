@@ -1,0 +1,21 @@
+# Mesh Network Server File
+# Format: name  ip  user  pass  role  tunnel_port  user_port
+#
+# name:        Human-readable identifier (used in logs, progress, summary)
+# ip:          Server public IP address
+# user:        SSH username
+# pass:        SSH password
+# role:        iran or kharej
+# tunnel_port: Base port for core-to-core communication (incremented per opposite-role server)
+# user_port:   Base port for user-facing traffic (incremented per opposite-role server on Iran side)
+#
+# Lines starting with # are comments. Blank lines are ignored.
+
+# --- Iran servers ---
+iran-a    1.2.3.4    root  mypass123  iran    30000  443
+iran-b    5.6.7.8    root  mypass456  iran    30000  443
+
+# --- Kharej servers ---
+kharej-1  9.10.11.12    root  mypass789  kharej  30000  443
+kharej-2  13.14.15.16   root  mypass012  kharej  30000  443
+kharej-3  17.18.19.20   root  mypass345  kharej  30000  443
