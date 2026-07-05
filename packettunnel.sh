@@ -34,7 +34,7 @@ function cleanup() {
 trap cleanup EXIT INT TERM
 
 # ===== CRLF Self-Check =====
-if [[ "${BASH_SOURCE[0]}" =~ /dev/fd/ ]]; then
+if [[ "${BASH_SOURCE[0]:-}" =~ /dev/fd/ ]]; then
     # Script is being piped - check for carriage returns
     if grep -q $'\r' <(head -20 "$0"); then
         error "Script has Windows line endings (CRLF). Please convert with: sed -i 's/\r$//' script.sh"
@@ -1016,13 +1016,13 @@ function is_installed() {
 
 function banner() {
     echo -e "\e[36m"
-    echo " ╔═╗╔═╗╔╦╗╔═╗╦  ╔═╗╔═╗╔╦╗╔═╗╦ ╦"
-    echo " ╠╣ ║ ║║║║╣ ║  ║╣ ║   ║ ║╣ ╚╦╝"
-    echo " ╚  ╚═╝╩ ╩╚═╝╩═╝╚═╝╚═╝ ╩ ╚═╝ ╩ "
+    echo " â•”â•â•—â•”â•â•—â•”â•¦â•—â•”â•â•—â•¦  â•”â•â•—â•”â•â•—â•”â•¦â•—â•”â•â•—â•¦ â•¦"
+    echo " â• â•£ â•‘ â•‘â•‘â•‘â•‘â•£ â•‘  â•‘â•£ â•‘   â•‘ â•‘â•£ â•šâ•¦â•"
+    echo " â•š  â•šâ•â•â•© â•©â•šâ•â•â•©â•â•â•šâ•â•â•šâ•â• â•© â•šâ•â• â•© "
     echo -e "\e[31m"
-    echo " ╔═╗╦ ╦╔═╗╔╗╔╔╦╗╦ ╦╔═╗  ╔╦╗╔═╗╦  ╔═╗╔═╗╔╦╗"
-    echo " ║  ╠═╣╠═╣║║║ ║ ║ ║╠═╝   ║ ║ ║║  ╠═╝╠═╣ ║ "
-    echo " ╚═╝╩ ╩╩ ╩╝╚╝ ╩ ╚═╝╩      ╩ ╚═╝╩═╝╩  ╩ ╩ ╩ "
+    echo " â•”â•â•—â•¦ â•¦â•”â•â•—â•”â•—â•”â•”â•¦â•—â•¦ â•¦â•”â•â•—  â•”â•¦â•—â•”â•â•—â•¦  â•”â•â•—â•”â•â•—â•”â•¦â•—"
+    echo " â•‘  â• â•â•£â• â•â•£â•‘â•‘â•‘ â•‘ â•‘ â•‘â• â•â•   â•‘ â•‘ â•‘â•‘  â• â•â•â• â•â•£ â•‘ "
+    echo " â•šâ•â•â•© â•©â•© â•©â•â•šâ• â•© â•šâ•â•â•©      â•© â•šâ•â•â•©â•â•â•©  â•© â•© â•© "
     echo -e "\e[0m"
     echo " WATERWALL - \e[36mBY MEYSAM\e[31m"
     local ver_status
