@@ -606,21 +606,18 @@ function generate_reverse_server_config() {
     local -a tun_ips=("$@")
 
     mkdir -p "$outdir"
-    local listeners=""
+
+    # Build whitelist of kharej TUN source IPs (10.{ai}.{bj}.2)
+    local whitelist=""
     local bj=1
     for tip in "${tun_ips[@]}"; do
-        if [[ -n "$listeners" ]]; then
-            listeners+=","
+        # Iran TUN IP is 10.{ai}.{bj}.1, kharej side is 10.{ai}.{bj}.2
+        local kharej_tip
+        kharej_tip="$(echo "$tip" | sed 's/\.[0-9]*$/\.2/')"
+        if [[ -n "$whitelist" ]]; then
+            whitelist+=", "
         fi
-        listeners+=$(cat <<EOF
-        {
-            "name": "kharej_inbound_b${bj}",
-            "type": "TcpListener",
-            "settings": { "address": "$tip", "port": \$reverse_port\$, "nodelay": true },
-            "next": "reverse_server"
-        }
-EOF
-)
+        whitelist+="\"${kharej_tip}/32\""
         bj=$((bj + 1))
     done
 
@@ -630,14 +627,13 @@ EOF
     "variables": {
         "user_port": $user_port,
         "reverse_port": $reverse_port,
-        "a_real_ip": "$iran_ip",
         "reverse_secret": "$reverse_secret"
     },
     "nodes": [
         {
             "name": "users_inbound",
             "type": "TcpListener",
-            "settings": { "address": \$a_real_ip\$, "port": \$user_port\$, "nodelay": true },
+            "settings": { "address": "0.0.0.0", "port": \$user_port\$, "nodelay": true },
             "next": "header-client"
         },
         {
@@ -662,7 +658,12 @@ EOF
             "settings": { "reverse-secret": \$reverse_secret\$ },
             "next": "bridge_reverse_side"
         },
-        $listeners
+        {
+            "name": "kharej_inbound",
+            "type": "TcpListener",
+            "settings": { "address": "0.0.0.0", "port": \$reverse_port\$, "nodelay": true, "whitelist": [ $whitelist ] },
+            "next": "reverse_server"
+        }
     ]
 }
 EOF
@@ -732,6 +733,163 @@ function generate_reverse_client_config() {
     ]
 }
 EOF
+}
+
+# ============================================================================
+# CONFIG GENERATORS - HAPROXY SINGLE-TARGET VARIANTS
+# ============================================================================
+
+function generate_forward_user_config_single() {
+    local ai=$1 bj=$2 local_port=$3 forward_port=$4 mux_count=$5 kharej_tun_ip=$6 outdir=$7
+
+    mkdir -p "$outdir"
+    cat > "$outdir/user_forward_a${ai}_b${bj}.json" <<EOF
+{
+    "name": "a${ai}-forward-b${bj}",
+    "variables": {
+        "local_port": $local_port,
+        "port_to_connect": $forward_port,
+        "each_worker_mux_connections_count": $mux_count
+    },
+    "nodes": [
+        {
+            "name": "users_inbound_b${bj}",
+            "type": "TcpListener",
+            "settings": { "address": "127.0.0.1", "port": \$local_port\$, "nodelay": true },
+            "next": "header-client-b${bj}"
+        },
+        {
+            "name": "header-client-b${bj}",
+            "type": "HeaderClient",
+            "settings": { "data": "src_context->port" },
+            "next": "mux-client-b${bj}"
+        },
+        {
+            "name": "mux-client-b${bj}",
+            "type": "MuxClient",
+            "settings": {
+                "mode": "fixed-connections-count",
+                "per-worker-connections-count": \$each_worker_mux_connections_count\$
+            },
+            "next": "tcp-out-b${bj}"
+        },
+        {
+            "name": "tcp-out-b${bj}",
+            "type": "TcpConnector",
+            "settings": {
+                "address": "$kharej_tun_ip",
+                "port": \$port_to_connect\$,
+                "nodelay": true
+            }
+        }
+    ]
+}
+EOF
+}
+
+function generate_reverse_server_config_single() {
+    local ai=$1 bj=$2 tun_ip_a=$3 reverse_port=$4 reverse_secret=$5 local_port=$6 outdir=$7
+
+    mkdir -p "$outdir"
+    cat > "$outdir/reverse_server_a${ai}_b${bj}.json" <<EOF
+{
+    "name": "a${ai}-reverse-b${bj}",
+    "variables": {
+        "local_port": $local_port,
+        "reverse_port": $reverse_port,
+        "reverse_secret": "$reverse_secret"
+    },
+    "nodes": [
+        {
+            "name": "users_inbound_b${bj}",
+            "type": "TcpListener",
+            "settings": { "address": "127.0.0.1", "port": \$local_port\$, "nodelay": true },
+            "next": "header-client-b${bj}"
+        },
+        {
+            "name": "header-client-b${bj}",
+            "type": "HeaderClient",
+            "settings": { "data": "src_context->port" },
+            "next": "bridge_user_side_b${bj}"
+        },
+        {
+            "name": "bridge_user_side_b${bj}",
+            "type": "Bridge",
+            "settings": { "pair": "bridge_reverse_side_b${bj}" }
+        },
+        {
+            "name": "bridge_reverse_side_b${bj}",
+            "type": "Bridge",
+            "settings": { "pair": "bridge_user_side_b${bj}" }
+        },
+        {
+            "name": "reverse_server_b${bj}",
+            "type": "ReverseServer",
+            "settings": { "reverse-secret": \$reverse_secret\$ },
+            "next": "bridge_reverse_side_b${bj}"
+        },
+        {
+            "name": "kharej_inbound_b${bj}",
+            "type": "TcpListener",
+            "settings": { "address": "$tun_ip_a", "port": \$reverse_port\$, "nodelay": true },
+            "next": "reverse_server_b${bj}"
+        }
+    ]
+}
+EOF
+}
+
+function generate_haproxy_config() {
+    local bind_addr="$1" hc_sni="$2" outfile="$3"
+    shift 3
+    local -a servers=("$@")
+
+    local sni_line=""
+    if [[ -n "$hc_sni" ]]; then
+        sni_line=" sni $hc_sni"
+    fi
+
+    cat > "$outfile" <<EOF
+global
+    log /dev/log local0
+    maxconn 100000
+
+defaults
+    mode tcp
+    log global
+    option dontlognull
+    timeout connect 5s
+    timeout client  1h
+    timeout server  1h
+
+frontend ww_in
+    bind ${bind_addr}:443
+    default_backend ww_be
+
+backend ww_be
+    balance roundrobin
+    default-server check check-ssl verify none inter 3s fall 3 rise 2${sni_line}
+$(printf '    %s\n' "${servers[@]}")
+EOF
+}
+
+function install_haproxy() {
+    if ! command -v haproxy >/dev/null 2>&1; then
+        log "Installing HAProxy..."
+        wait_for_apt
+        apt-get update -qq >/dev/null 2>&1
+        apt-get install -y -qq haproxy >/dev/null 2>&1
+        log "HAProxy installed."
+    fi
+    mkdir -p /etc/haproxy
+    if [[ -f /etc/default/haproxy ]]; then
+        sed -i 's/^ENABLED=.*/ENABLED=1/' /etc/default/haproxy 2>/dev/null || true
+        grep -q '^ENABLED=' /etc/default/haproxy 2>/dev/null || echo 'ENABLED=1' >> /etc/default/haproxy
+    fi
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable haproxy 2>/dev/null || true
+    systemctl restart haproxy
+    log "HAProxy service enabled and restarted."
 }
 
 # ============================================================================
@@ -1008,6 +1166,8 @@ function mesh_deploy_remote() {
     local user_port="${MESH_USER_PORT:-443}"
     local reverse_port="${MESH_REVERSE_PORT:-443}"
     local mux_count="${MESH_MUX_COUNT:-9}"
+    local use_haproxy="${MESH_USE_HAPROXY:-false}"
+    local hc_sni="${MESH_HC_SNI:-}"
 
     if [[ -z "$role" || -z "$server_ip" || -z "$approach" || -z "$tunnels_b64" ]]; then
         echo "Error: Missing MESH environment variables." >&2
@@ -1052,28 +1212,49 @@ function mesh_deploy_remote() {
 
     if [[ "$approach" == "reverse" ]]; then
         if [[ "$role" == "iran" ]]; then
-            # Generate reverse server config with all TUN IPs
-            local -a tun_ips=()
-            for ((i = 0; i < count; i++)); do
-                ai="$(echo "$tunnels_json" | jq -r ".[$i].ai")"
-                bj="$(echo "$tunnels_json" | jq -r ".[$i].bj")"
-                tun_ips+=("$(mesh_tun_ip_a $ai $bj)")
-            done
+            if [[ "$use_haproxy" == "true" ]]; then
+                # HAProxy mode: generate one reverse server config per kharej
+                local -a haproxy_servers=()
+                for ((i = 0; i < count; i++)); do
+                    ai="$(echo "$tunnels_json" | jq -r ".[$i].ai")"
+                    bj="$(echo "$tunnels_json" | jq -r ".[$i].bj")"
+                    local tun_ip_a
+                    tun_ip_a="$(mesh_tun_ip_a $ai $bj)"
+                    local local_port=$((9000 + bj))
 
-            # Use the first ai (all tunnels on this A server share the same ai)
-            local my_ai
-            my_ai="$(echo "$tunnels_json" | jq -r ".[0].ai")"
+                    generate_reverse_server_config_single "$ai" "$bj" "$tun_ip_a" "$reverse_port" "$reverse_secret" "$local_port" "$BASE_DIR/configs"
+                    config_files+=("configs/reverse_server_a${ai}_b${bj}.json")
+                    echo "  Generated reverse_server_a${ai}_b${bj}.json (HAProxy local port $local_port)"
+                    haproxy_servers+=("server ww_b${bj} 127.0.0.1:${local_port}")
+                done
 
-            generate_reverse_server_config "$my_ai" "$server_ip" "$reverse_port" "$reverse_secret" "$user_port" "$BASE_DIR/configs" "${tun_ips[@]}"
-            config_files+=("configs/reverse_server_a${my_ai}.json")
-            echo "  Generated reverse_server_a${my_ai}.json"
+                # Generate and install HAProxy config
+                generate_haproxy_config "$server_ip" "$hc_sni" "/etc/haproxy/haproxy.cfg" "${haproxy_servers[@]}"
+                echo "  Generated HAProxy config with ${#haproxy_servers[@]} backend(s)"
+                install_haproxy
+            else
+                # Standard mode: single reverse server config with all TUN IPs
+                local -a tun_ips=()
+                for ((i = 0; i < count; i++)); do
+                    ai="$(echo "$tunnels_json" | jq -r ".[$i].ai")"
+                    bj="$(echo "$tunnels_json" | jq -r ".[$i].bj")"
+                    tun_ips+=("$(mesh_tun_ip_a $ai $bj)")
+                done
+
+                local my_ai
+                my_ai="$(echo "$tunnels_json" | jq -r ".[0].ai")"
+
+                generate_reverse_server_config "$my_ai" "$server_ip" "$reverse_port" "$reverse_secret" "$user_port" "$BASE_DIR/configs" "${tun_ips[@]}"
+                config_files+=("configs/reverse_server_a${my_ai}.json")
+                echo "  Generated reverse_server_a${my_ai}.json"
+            fi
         else
             # Generate reverse client config for each A server
             for ((i = 0; i < count; i++)); do
                 ai="$(echo "$tunnels_json" | jq -r ".[$i].ai")"
                 bj="$(echo "$tunnels_json" | jq -r ".[$i].bj")"
                 local tun_ip_a
-                tun_ip_a="$(mesh_tun_ip_a $ai $bj)"
+                tun_ip_a="$(mesh_tun_ip_b $ai $bj)"
 
                 generate_reverse_client_config "$bj" "$ai" "$tun_ip_a" "$reverse_port" "$final_ip" "$final_port" "$min_unused" "$reverse_secret" "$BASE_DIR/configs"
                 config_files+=("configs/reverse_client_b${bj}_a${ai}.json")
@@ -1082,20 +1263,43 @@ function mesh_deploy_remote() {
         fi
     elif [[ "$approach" == "forward" ]]; then
         if [[ "$role" == "iran" ]]; then
-            # Generate forward user config with all B TUN IPs
-            local -a kharej_tun_ips=()
-            for ((i = 0; i < count; i++)); do
-                ai="$(echo "$tunnels_json" | jq -r ".[$i].ai")"
-                bj="$(echo "$tunnels_json" | jq -r ".[$i].bj")"
-                kharej_tun_ips+=("$(mesh_tun_ip_b $ai $bj)")
-            done
+            if [[ "$use_haproxy" == "true" ]]; then
+                # HAProxy mode: generate one forward user config per kharej
+                local -a haproxy_servers=()
+                local my_ai
+                my_ai="$(echo "$tunnels_json" | jq -r ".[0].ai")"
+                for ((i = 0; i < count; i++)); do
+                    bj="$(echo "$tunnels_json" | jq -r ".[$i].bj")"
+                    local kharej_tun_ip
+                    kharej_tun_ip="$(mesh_tun_ip_b $my_ai $bj)"
+                    local local_port=$((9000 + bj))
 
-            local my_ai
-            my_ai="$(echo "$tunnels_json" | jq -r ".[0].ai")"
+                    generate_forward_user_config_single "$my_ai" "$bj" "$local_port" "$reverse_port" "$mux_count" "$kharej_tun_ip" "$BASE_DIR/configs"
+                    config_files+=("configs/user_forward_a${my_ai}_b${bj}.json")
+                    echo "  Generated user_forward_a${my_ai}_b${bj}.json (HAProxy local port $local_port)"
+                    haproxy_servers+=("server ww_b${bj} 127.0.0.1:${local_port}")
+                done
 
-            generate_forward_user_config "$my_ai" "$user_port" "$reverse_port" "$mux_count" "$BASE_DIR/configs" "${kharej_tun_ips[@]}"
-            config_files+=("configs/user_forward_a${my_ai}.json")
-            echo "  Generated user_forward_a${my_ai}.json"
+                # Generate and install HAProxy config
+                generate_haproxy_config "$server_ip" "$hc_sni" "/etc/haproxy/haproxy.cfg" "${haproxy_servers[@]}"
+                echo "  Generated HAProxy config with ${#haproxy_servers[@]} backend(s)"
+                install_haproxy
+            else
+                # Standard mode: single forward user config with weighted TcpConnector
+                local -a kharej_tun_ips=()
+                for ((i = 0; i < count; i++)); do
+                    ai="$(echo "$tunnels_json" | jq -r ".[$i].ai")"
+                    bj="$(echo "$tunnels_json" | jq -r ".[$i].bj")"
+                    kharej_tun_ips+=("$(mesh_tun_ip_b $ai $bj)")
+                done
+
+                local my_ai
+                my_ai="$(echo "$tunnels_json" | jq -r ".[0].ai")"
+
+                generate_forward_user_config "$my_ai" "$user_port" "$reverse_port" "$mux_count" "$BASE_DIR/configs" "${kharej_tun_ips[@]}"
+                config_files+=("configs/user_forward_a${my_ai}.json")
+                echo "  Generated user_forward_a${my_ai}.json"
+            fi
         else
             # Generate forward server config with all A TUN IPs
             local -a iran_tun_ips=()
@@ -1179,6 +1383,7 @@ function mesh_deploy() {
     esac
 
     local user_port reverse_port final_ip final_port min_unused reverse_secret mtu_val mux_count
+    local use_haproxy="false" hc_sni=""
 
     user_port="$(ask_port "User-facing port on A servers" "443")"
     [[ -z "$user_port" ]] && return
@@ -1191,6 +1396,7 @@ function mesh_deploy() {
     [[ -z "$final_port" ]] && return
 
     if [[ "$approach" == "reverse" ]]; then
+        mux_count=9
         min_unused="$(ask_string "Minimum held reverse connections per worker" "32")"
         reverse_secret="$(ask_string "Reverse secret (shared across all servers)" "")"
         [[ -z "$reverse_secret" ]] && { echo "Reverse secret cannot be empty."; pause_return_menu; return; }
@@ -1201,6 +1407,16 @@ function mesh_deploy() {
     fi
 
     mtu_val="$(ask_string "MTU value" "1400")"
+
+    echo
+    echo "Use HAProxy for load balancing on Iran? (deep TLS health check, auto failover)"
+    local haproxy_choice
+    read -rp "  [y/N]: " haproxy_choice || haproxy_choice=""
+    if [[ "$haproxy_choice" =~ ^[Yy] ]]; then
+        use_haproxy="true"
+        echo "  Health-check SNI (for Xray REALITY strict-SNI; leave blank for plain TLS/Vision)"
+        read -rp "  SNI [none]: " hc_sni || hc_sni=""
+    fi
 
     echo
     echo "Parsing server file..."
@@ -1227,6 +1443,9 @@ function mesh_deploy() {
     echo "Mesh plan: $num_iran Iran × $num_kharej Kharej = $total_tunnels tunnel pair(s)"
     echo "Approach: $approach"
     echo "Ports: user=$user_port, reverse/mux=$reverse_port, final=$final_ip:$final_port"
+    if [[ "$use_haproxy" == "true" ]]; then
+        echo "HAProxy: enabled (deep TLS health check, auto failover)"
+    fi
     echo
 
     printf "%-8s %-10s %-12s %-14s %-14s\n" "Pair#" "Iran" "Kharej" "A TUN IP" "B TUN IP"
@@ -1336,7 +1555,7 @@ function mesh_deploy() {
         fi
 
         echo "  Running mesh deployment on $s_ip..."
-        local env_vars="MESH_ROLE=$s_role MESH_SERVER_IP=$s_ip MESH_APPROACH=$approach MESH_MTU=$mtu_val MESH_TUNNELS_B64=$b64 MESH_MIN_UNUSED=$min_unused MESH_FINAL_IP=$final_ip MESH_FINAL_PORT=$final_port MESH_USER_PORT=$user_port MESH_REVERSE_PORT=$reverse_port MESH_MUX_COUNT=$mux_count"
+        local env_vars="MESH_ROLE=$s_role MESH_SERVER_IP=$s_ip MESH_APPROACH=$approach MESH_MTU=$mtu_val MESH_TUNNELS_B64=$b64 MESH_MIN_UNUSED=$min_unused MESH_FINAL_IP=$final_ip MESH_FINAL_PORT=$final_port MESH_USER_PORT=$user_port MESH_REVERSE_PORT=$reverse_port MESH_MUX_COUNT=$mux_count MESH_USE_HAPROXY=$use_haproxy MESH_HC_SNI=$hc_sni"
         if [[ "$approach" == "reverse" ]]; then
             env_vars="$env_vars MESH_REVERSE_SECRET=$reverse_secret"
         fi
@@ -1362,6 +1581,9 @@ function mesh_deploy() {
     echo "  Approach: $approach"
     echo "  One waterwall-mesh service per server"
     echo "  Ports: user=$user_port, reverse/mux=$reverse_port, final=$final_ip:$final_port"
+    if [[ "$use_haproxy" == "true" ]]; then
+        echo "  HAProxy: enabled (deep TLS health check, auto failover)"
+    fi
     echo
     echo "Log files saved as mesh-*.log in current directory."
     pause_return_menu
